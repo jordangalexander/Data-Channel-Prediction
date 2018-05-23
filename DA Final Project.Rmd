@@ -1,0 +1,442 @@
+---
+title: "Data Analytics Final Project"
+author: "Jordan Alexander"
+resource_files:
+- .Renviron
+- .Renviron
+output:
+  html_notebook:
+    code_folding: hide
+    toc: true
+    toc_depth: 4
+    toc_float: yes
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(data.world)
+library(tidyverse)
+library(MASS)
+library(ISLR)
+library(dplyr)
+library(SDSRegressionR)
+library(shiny)
+library(ggplot2)
+library(modelr)
+library(rms)
+library(class)
+require(ISLR)
+library(leaps)
+library(gbm)
+require(graphics)
+library(ROCR)
+library(boot)
+library(pROC)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import Data 
+### Data Import From data.world
+```{r}
+project <- "https://data.world/jalex11/f-17-eda-final-project"
+data.world::set_config(cfg_env("DW_API"))
+news <- data.world::query(
+  data.world::qry_sql("SELECT * FROM OnlineNewsPopularity"),
+  dataset = project)
+```
+
+### Data Subsetting for Test/Train
+First I created a subset of the news dataframe that contains only continuous variables.
+```{r}
+numericNews <- subset(news, select = c("shares", "n_tokens_title", "n_tokens_content", "n_unique_tokens", "n_non_stop_words", "n_non_stop_unique_tokens", "num_hrefs", "num_self_hrefs", "num_imgs", "num_videos","average_token_length", "num_keywords","self_reference_avg_sharess","lda_00","lda_01","lda_02","lda_03","lda_04","global_subjectivity","rate_positive_words","rate_negative_words","title_subjectivity"))
+```
+
+```{r}
+trainingData = subset(news, is_weekend == 0)
+testData = subset(news, is_weekend == 1)
+set.seed(1)
+trimmedNews = news[sample(nrow(news),20000),]
+```
+Here I subset the data into a testing set and a training set. The testing set is all of the data from the weekend, and the training set is the remaining data.
+
+
+## Data Visualization
+Here are some links to insights of quick data visualization:
+
+https://data.world/jalex11/f-17-eda-final-project/insights/8c0add44-72f4-4e7d-bc07-840264698f4b
+
+https://data.world/jalex11/f-17-eda-final-project/insights/8c0add44-72f4-4e7d-bc07-840264698f4b
+
+https://data.world/jalex11/f-17-eda-final-project/insights/8c0add44-72f4-4e7d-bc07-840264698f4b
+
+https://data.world/jalex11/f-17-eda-final-project/insights/5b42dd02-8868-4efa-95d1-45e7198306fd
+
+https://data.world/jalex11/f-17-eda-final-project/insights/00c7a651-657a-4860-bfdb-6bda1bf8019a
+
+https://data.world/jalex11/f-17-eda-final-project/insights/05f88b8a-88a8-4204-9da8-a1e3d54a21a1
+
+## Multiple Predictor Linear Regression
+### Linear Model for Shares
+I attempted fitting a linear model to predict the "shares" variable, using the variables that boosting showed to be most important as predictors. Using the two most important variables, I obtained a very poor model with an R squared of 0.01423.
+
+```{r}
+linearFit = lm(shares ~ self_reference_min_shares + kw_avg_avg, news)
+summary(linearFit)
+```
+To determine why the model fit the data so poorly, I used the pairs function to determine what correlation exists between "shares" and the five most important variables (according to my boosting results).
+
+```{r}
+renderPlot(pairs(~ shares + self_reference_min_shares + kw_avg_avg + n_tokens_content + self_reference_avg_sharess + self_reference_max_shares, news))
+```
+After seeing the apparent exponential dependence of shares on the other predictors I used in my first attempt at linear regression, I created a new variable called "lshares" which is the base 2 log of the "shares" variable. I then attempted to perform linear regression with "lshares" as the response variable. The model improved slightly, but the R squared was still very poor.
+
+```{r}
+newNews <- news %>% dplyr::mutate(lshares = log2(shares))
+linearFit = lm(lshares ~ self_reference_min_shares + kw_avg_avg + n_tokens_content, newNews)
+summary(linearFit)
+```
+
+### Linear Model for Positive Word Rate
+```{r}
+mod <- lm(rate_positive_words ~ avg_positive_polarity + max_negative_polarity + data_channel_is_entertainment + average_token_length + n_non_stop_unique_tokens + n_non_stop_words + lda_00 + lda_01 +lda_02 + lda_03 + lda_04 + global_subjectivity + global_rate_positive_words + global_rate_negative_words + rate_negative_words, data = news)
+summary(mod)
+```
+Here, I created a linear regression model predicting the rate of positive words by all of the predictors listed in the model. Each predictor in the model was highly significant, with the overall model reporting an R-squared value of 0.9972, meaning the model accounts for 99.72% of the variance in the data. The overall model was also significant based on the p-value, and reported an F-statistic of 9.518e+05.
+Insight Link: https://data.world/jalex11/f-17-eda-final-project/insights/00736977-d7f0-4c1f-8ae3-f1664df43433
+
+## Residual Analysis
+We next tried to use residual analysis to try and improve our linear model for rate_positive_words. I began by using the pairs function to visualize the dependence of rate_positive_words on a subset of the predictors that we used.
+```{r}
+#renderPlot(pairs(rate_positive_words ~ lda_00 + lda_01 + lda_02 + lda_03 + lda_04 + rate_negative_words, data = news))
+```
+There appeared to be a strong linear dependence of rate_positive_words on rate_negative_words. I then made a simple linear model using rate_negative_words as a predictor.
+```{r}
+#firstModel = lm(rate_positive_words ~ rate_negative_words, data = news)
+#summary(firstModel)
+```
+I then added the residuals from this model as a column in the data set and re-ran pairs to see the dependence of the residuals on the other predictors. I next fit a model trying to predict the residuals using these other predictors and ended up getting a good R squared value.
+```{r}
+#secondModel = lm(resid ~ n_non_stop_words + lda_00 + lda_01 + lda_02 + lda_03 + lda_04, data = news)
+#summary(secondModel)
+```
+Combining these models we obtain an excellent model for rate_positive_words.
+```{r}
+#thirdModel = lm(rate_positive_words ~ n_non_stop_words + lda_00 + lda_01 + lda_02 + lda_03 + lda_04 + rate_negative_words, data = news)
+#summary(thirdModel)
+```
+
+## Logistic Regression
+### Logistic Regression Model
+```{r}
+glm.fit <- glm(data_channel_is_bus ~ lda_00 + lda_03 + lda_04 + kw_max_avg + kw_avg_max + kw_avg_avg + timedelta + num_imgs + global_subjectivity, data = news, family = "binomial")
+summary(glm.fit)
+```
+Here I created a logistic regression model trying to predict the data_channel type being a "business" type. I used boosting to choose these predictors in my model. All proved to be highly significant based on the p-value reported for each.
+
+### Confidence Intervals
+```{r}
+exp(glm.fit$coef) # odds ratios
+exp(confint.default(glm.fit)) # confidence intervals
+```
+Here I have reported the confidence intervals for all of the predictors in my logistic regression model.
+
+### Prediction Using Logistic Regression
+```{r}
+# predictive probabilities
+glm.probs = predict(glm.fit, type = "response") 
+#glm.probs[1:5]
+mean(glm.probs)
+glm.pred = ifelse(glm.probs > .1578549, 1, 0)
+
+table(glm.pred, news$data_channel_is_bus) # confusion matrix
+mean(glm.pred == news$data_channel_is_bus) # percentage correctly predicted
+```
+Here I made predictions based on the logistic regression model I created. I successfully predicted if the given channel was a business type. This is a very accurate prediction rate and proves the model I created is a sufficient predictor of a given online news channel being a business type.
+
+## Linear Discriminant Analysis
+### Initialize lda Fit
+```{r}
+lda.fit = lda(num_keywords ~ lda_01 + lda_00 + lda_02 + lda_03 + kw_min_max + kw_max_min + kw_max_avg + kw_avg_max + kw_min_avg, data = trainingData)
+```
+
+### Predictions with lda
+```{r}
+lda.pred = predict(lda.fit, testData)
+table(lda.pred$class, testData$num_keywords) # confusion matrix
+mean(lda.pred$class == testData$num_keywords) # average correcly predicted
+```
+Here is the resulting confusion matrix for the lda prediction. Trying to predict a 10-level categorical variable waas a difficult task and as a result, the prediction accuracy is only ~25%. However, considering the low prior probabilities, the error rate isn't terrible. This shows that either the predicted variable is highly unpredictable, or the data just isn't suited for this prediction.
+
+## Quadratic Discriminant Analysis
+### QDA Fit 
+```{r}
+qda.fit = qda(num_keywords ~ kw_min_max + kw_avg_min + kw_min_max + kw_avg_min + kw_max_avg, data = trainingData)
+```
+
+### Predicting on QDA Fit
+```{r}
+qda.class = predict(qda.fit, testData)
+table(qda.class$class, testData$num_keywords) # confusion matrix
+mean(qda.class$class == testData$num_keywords)
+```
+This is the resulting confusion matrix for the QDA prediction. This prediction method also shows that either the predicted variable is highly unpredictable, or the data just isn't suited for this prediction.
+
+## K-Nearest Neighbors
+```{r}
+attach(news)
+Xlag = cbind(kw_min_max, kw_avg_min, kw_min_max, kw_avg_min, kw_max_avg)
+train = news$is_weekend == 0
+knn.pred = knn(Xlag[train,], Xlag[!train,], num_keywords[train], use.all = TRUE)
+mean(knn.pred == num_keywords[!train])
+```
+This is the resulting confusion matrix and prediction accuracy for the KNN prediction. This prediction method also shows that either the predicted variable is highly unpredictable, or the data just isn't suited for this prediction. It is interesting to note that KNN did a worse job than the other two in predicing the number of keywords.
+
+## ROC Curve
+```{r}
+require(ROCR)
+require(pROC)
+
+lda_roc = lda(data_channel_is_lifestyle ~ lda_04, data = news)
+summary(lda_roc)
+lda_roc.pred = predict(lda_roc, news) 
+pred = prediction(lda_roc.pred$posterior[,2], news$data_channel_is_lifestyle) 
+perf = performance(pred, "tpr","fpr")
+renderPlot(plot(perf, colorize=TRUE))
+```
+Insight Link for Explanation: https://data.world/jalex11/f-17-eda-final-project/insights/3e5b498c-1ff1-4507-837e-dec074f2732d
+
+
+## Validation
+```{r}
+require(MASS)
+set.seed(1)
+subpopdata = news[sample(nrow(news),2000),]
+```
+
+### LOOCV
+```{r}
+require(MASS)
+require(ISLR)
+require(boot)
+glm.fit=glm(shares~rate_positive_words, data=subpopdata)
+cv.glm(subpopdata,glm.fit)$delta 
+
+loocv=function(fit){ 
+h=lm.influence(fit)$h 
+mean((residuals(fit)/(1-h))^2)
+}
+
+loocv(glm.fit) 
+
+cv.error=rep(0,5) 
+degree=1:5
+for(d in degree){
+glm.fit=glm(shares~poly(rate_positive_words,d), data=subpopdata) 
+cv.error[d]=loocv(glm.fit)
+}
+renderPlot(plot(degree,cv.error,type="b"))
+```
+
+### 10-fold CV
+```{r}
+cv.error10=rep(0,5) 
+for(d in degree){
+glm.fit=glm(shares~poly(rate_positive_words,d), data=subpopdata)
+cv.error10[d]=cv.glm(subpopdata,glm.fit,K=10)$delta[1] 
+}
+#renderPlot(lines(degree,cv.error,type="b",col="red"))
+renderPlot(plot(degree,cv.error10,type="b"))
+
+summary(glm.fit)
+```
+
+### The Bootstrap
+```{r}
+alpha=function(x,y){ 
+vx=var(x) 
+vy=var(y) 
+cxy=cov(x,y)
+(vy-cxy)/(vx+vy-2*cxy) 
+}
+alpha(news$rate_negative_words,news$shares) 
+
+alpha.fn=function(data, index){ 
+with(data[index,],alpha(rate_negative_words,shares)) 
+}
+alpha.fn(news,1:100) 
+
+set.seed(1) 
+alpha.fn (news,sample(1:100,100,replace=TRUE)) 
+
+boot.out=boot(news,alpha.fn,R=1000) 
+boot.out 
+renderPlot(plot(boot.out))
+```
+
+## Decision Tree
+### Boosting
+```{r}
+#require(gbm)
+#boost.news = gbm(data_channel_is_bus ~ .-url, data = trimmedNews, distribution = "gaussian", n.trees = 10000, shrinkage = 0.01, interaction.depth = 4)
+#summary(boost.news)
+```
+Here I commeneted out the boosting because the data set is so large it takes a long time to run the code. What the boosting accomplished is showing me the relative influence of all of the variables (except for "url") on the variable "data_channel_is_bus". I exclued all of the other data_channel variables because they are all highly correlated and would skew the results of the prediction. This variable of interest is what I am trying to predict, so this is the method I used to explore the predictors for the models I created. I also used this method for all of the other models I created in the project. Inight link:
+https://data.world/jalex11/f-17-eda-final-project/insights/0f522b39-116f-4500-82d3-924c1180b9ef
+
+### Tree Creation and Prediction
+```{r}
+require(tree)
+attach(news)
+tree.news = tree(as.factor(data_channel_is_bus) ~ .-url-data_channel_is_entertainment-data_channel_is_lifestyle-data_channel_is_socmed-data_channel_is_tech-data_channel_is_world, data = trainingData)
+#summary(tree.news)
+#plot(tree.news)
+#text(tree.news, pretty = 0)
+#plot(tree.news);text(tree.news, pretty = 0)
+tree.pred = predict(tree.news, testData, type = "class")
+with(testData, table(tree.pred, data_channel_is_bus)) # confusion matrix
+4917/5190 # model accuracy
+(5190-4917)/5190 # misclassification error
+```
+Here I created a decision tree that is attempting to predict if a given online news source is a business data type. I created the tree with the intent of comparing the ability of the tree to predict versus the same variable as the logistic regression. I commented out the code that renders an image because of issues encountered with the shiny cloud. Here is a link to insights containing the image:
+
+https://data.world/jalex11/f-17-eda-final-project/insights/3a01611f-ebcb-4793-85ab-fe2f13b37571
+
+The tree predicted ~95% correctly, which is a very good rate considering the volume of data in the testing set.
+
+### Prune the Tree
+```{r}
+#cv.news = cv.tree(tree.news, FUN = prune.misclass)
+#renderPlot(plot(cv.news))
+prune.news = prune.misclass(tree.news, best = 4)
+#plot(prune.news);text(prune.news, pretty = 0)
+```
+Here is an insight link to the pruned tree image commented out for the same reason:
+
+https://data.world/jalex11/f-17-eda-final-project/insights/19435c61-1af8-4799-a46c-62c2115124a0
+
+### Predict on Pruned Tree
+```{r}
+tree.pred = predict(prune.news, testData, type = "class")
+with(testData, table(tree.pred, data_channel_is_bus))
+4917/5190 # model accuracy
+```
+The pruned tree yielded the same prediction accuracy as the original tree, but the tree was simplified and the prediction was faster.
+
+## Subset Selection
+### Best Subsets
+I used best subset selection to attempt to improve on our linear model for "rate_positive_shares." I ran best subsets using the same restricted set of variables that was used in our first pass of a linear model for "rate_positive_shares." Although our linear model fits the data very well, it uses a large number of predictors and I wanted to see if we could use less predictors to obtain an equally good fit.
+
+```{r}
+library(leaps)
+regfit.full = regsubsets(rate_positive_words~shares+avg_positive_polarity+max_negative_polarity+data_channel_is_entertainment+average_token_length + n_non_stop_unique_tokens + n_non_stop_words + lda_00 + lda_01 + lda_02 + lda_03 + lda_04 + global_subjectivity + global_rate_positive_words + global_rate_negative_words + rate_negative_words, data=trimmedNews, nvmax=10)
+reg.summary=summary(regfit.full)
+#renderPlot(plot(reg.summary$cp, xlab="Number of Variables", ylab="Cp"))
+#reg.summary
+```
+We can see that after 7 predictors, we get very little, if any, improvement in the Cp value. Therefore it seems that 7 predictors is the ideal number to use. From the summary of the regsubsets output, I found these best 7 predictors to be n_non_stop_words, lda_00, lda_01, lda_02, lda_03, lda_04, and rate_negative_words.
+I then made a new model using these 7 predictors.
+```{r}
+newModel = lm(rate_positive_words ~ n_non_stop_words + lda_00 + lda_01 + lda_02 + lda_03 + lda_04 + rate_negative_words, data=trimmedNews)
+summary(newModel)
+```
+We can see that we kept the R squared value about the same but reduced the number of predictors used by about half.
+
+## Shrinkage Methods
+### The Lasso
+I used the lasso method to try and find a good model for the variable "rate_positive_words." I first attempted running the lasso method with all 61 predictors, however this was too large of a set of predictors for R to handle. Therefore I restricted the algorithm to the same set of predictors that Jordan used in the multiple linear regression model for rate_positive words. I did this using the following code:
+
+```{r}
+require(glmnet)
+x=model.matrix(rate_positive_words~shares+avg_positive_polarity+max_negative_polarity+data_channel_is_entertainment+average_token_length + n_non_stop_unique_tokens + n_non_stop_words + lda_00 + lda_01 + lda_02 + lda_03 + lda_04 + global_subjectivity + global_rate_positive_words + global_rate_negative_words + rate_negative_words ,data=trimmedNews) 
+y=trimmedNews$rate_positive_words
+fit.lasso=glmnet(x,y)
+renderPlot(plot(fit.lasso,xvar="lambda",label=TRUE))
+cv.lasso=cv.glmnet(x,y)
+renderPlot(plot(cv.lasso))
+coef(cv.lasso)
+```
+We can see that the number of non-stop words is a very significant predictor of the positive word rate, and also that the positive word rate is strongly negatively correlated with the negative word rate, which makes sense.
+
+### Ridge Regression
+I then used the ridge regression method to find a model for "rate_positive_words." I again used the same restricted set of predictors that I used for lasso to allow it to run on my computer. I did this using the following code:
+```{r}
+fit.ridge=glmnet(x,y,alpha=0)
+renderPlot(plot(fit.ridge,xvar="lambda",label=TRUE))
+cv.ridge=cv.glmnet(x,y,alpha=0)
+renderPlot(plot(cv.ridge))
+coef(cv.ridge)
+```
+
+## Support Vector Machines
+```{r}
+#numericNews <- subset(news, select = c("data_channel_is_bus", "shares", "n_tokens_title", "n_tokens_content", "n_unique_tokens", "n_non_stop_words", "n_non_stop_unique_tokens", "num_hrefs", "num_self_hrefs", "num_imgs", "num_videos","average_token_length", "num_keywords","self_reference_avg_sharess","lda_00","lda_01","lda_02","lda_03","lda_04","global_subjectivity","rate_positive_words","rate_negative_words","title_subjectivity"))
+#newTrimmedNews = numericNews[sample(nrow(news),3000),]
+#library(e1071) # linear and non-linear SVMs
+#svmfit = svm(data_channel_is_bus ~ ., data = newTrimmedNews, kernel = "linear", cost = 10, scale = FALSE)
+```
+
+## Unsupervised Learning
+### Principal Component Analysis
+I next performed principal component analysis. I used the principal components function in R, using a model for shares using all variables as predictors.
+```{r}
+library(pls)
+pca.fit = pcr(shares~., data=numericNews, scale=TRUE)
+pca.fit
+summary(pca.fit)
+renderPlot(validationplot(pca.fit, val.type="MSEP"))
+```
+
+### K-Means Clustering
+I ran K-Means clustering on the news data to try to find some patterns. Since the number of clusters used must be specified manually in K-means clustering, I first tried to find the optimal number of clusters. To find this optimum number of clusters, I used the between sum-of-squares to total sum-of-squares ratio. This ratio measures how much of the variance in the data is captured between the clusters. Like R^2, we want this to be as close to 1 as possible.
+I used the following code to produce a graph of this ratio for several different numbers of clusters used.
+```{r}
+numberOfClusters = 20
+ratios=rep(0,numberOfClusters)
+numClusters=rep(0,numberOfClusters)
+for(i in 2:(numberOfClusters+1)){
+km.out = kmeans(numericNews,i)
+ratio = as.numeric(km.out["betweenss"]) / as.numeric(km.out["totss"])
+ratios[i-1]=ratio
+numClusters[i-1]=i
+}
+renderPlot(plot(numClusters,ratios))
+```
+We can see that the ratio increases quite dramatically at first, but it eventually levels off. The ratio levels off at about 0.97. I decided to use the smallest number of clusters that came within 10% of this maximum ratio as the optimum number of clusters. This turned out to be 9 clusters.
+
+```{r}
+cutoff = ratios[numberOfClusters]*.9
+for(i in 1:numberOfClusters){
+if(ratios[i] > cutoff){
+bestNumClusters = i+1
+break
+}
+}
+km.out = kmeans(numericNews, bestNumClusters)
+```
+We can see that cluster 7 has by far the highest number of shares. Something that is interesting is that this cluster also has by far the lowest average title subjectivity of all the clusters. Another interesting observation is that cluster 8, which is the largest cluster by far, has the smallest average number of shares. This seems to show that most news articles do not end up being very popular.
+
+### Hierarchical Clustering
+I ran hierarchical clustering to compare it to k-means clustering. Because the data set is so large I had to run the hierarchical clustering algorithm with a 2000 row subset of the data.
+```{r}
+set.seed(1)
+trimmedNumericNews = numericNews[sample(nrow(numericNews),2000),]
+
+hc.complete=hclust(dist(trimmedNumericNews),method="complete")
+renderPlot(plot(hc.complete))
+```
+Running this algorithm produced a dendrogram that was incredibly dense and impossible to interpret. I decided to cut the tree at level 9 to allow me to compare it to the k-means clustering which was done using 9 clusters. After cutting the tree at level 9, I obtained the following plot:
+```{r}
+hc.cutc=cutree(hc.complete,9)
+renderPlot(plot(hc.cutc))
+```
+
+## Conclusions
+
+Beginning with multiple linear regression, our intent was to predict the rate of positive words. By adding predictors in and out of the model we were eventually able to obtain a model that accounted for 99.7% of the variance in the data. This R-Squared value jumped to .997 after adding in the variable "rate_negative_words". This is important to note because the two variables share mutlicolinearity. However, given the data, I would include this variable to make predictions because it most significantly predicts the rate of positive words in our data.
+
+Transitioning to dichotomous classification, I tried to predict if a given data source was a business type. My initial model correctly predicted 99% of the time because I inclued the other data source type variables in the prediction. To make this more of a challenge, I tried to predict without these variables. Beginning with logistic regression, my model had a correct prediction rate of 92.57%. This is a very low misclassification and proved my model was a sufficient predictor of the data source type. Next, I attempted this prediction by constructing a decision tree and pruning it. The final results showed that my tree had an even higher correct prediction rate than logistic, predicting ~ 95% correctly. This is highly significant and is interesting to note because it supports the idea that typically decision trees do a better job in predicting than logistic regression.
+
+Lastly we attempted classification of a 10-level categorical variable using LDA, QDA and KNN. The interesting finding here is that our data was not suited to predict this variable! The prior probabilities of being in a given level of the variable without considering concentrations is 10%. The highest correct prediction rate I could achieve was ~25% and was attained through the QDA method. This prediction rate is overall good considering the difficulty of prediction for this variable. However, this model is not reliable overall to predict the number of keywords on a given news channel.
+
+
+
